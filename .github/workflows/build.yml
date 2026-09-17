@@ -5,8 +5,13 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
+
+    # เพิ่มบรรทัดนี้เพื่อดึง cl.exe มาใช้งาน
+    - uses: ilammy/msvc-dev-cmd@v1
+
     - name: Compile
       run: cl /std:c++20 /EHsc /O2 fivem_esp.cpp /link d3d11.lib dxgi.lib user32.lib gdi32.lib /out:fivem_esp.exe
+
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
