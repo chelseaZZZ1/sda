@@ -1,13 +1,12 @@
 // fivem_esp.cpp — FiveM external ESP overlay
-// compile: cl /std:c++20 /EHsc /O2 fivem_esp.cpp /link d3d11.lib dxgi.lib d2d1.lib dcomp.lib dwmapi.lib
-// รันเป็น external overlay, อ่าน memory จาก GTAProcess.exe
-// ใช้ Direct2D + DirectComposition สำหรับ per-pixel alpha, ไม่กระพริบ
+// compile: cl /std:c++20 /EHsc /O2 fivem_esp.cpp /link d3d11.lib dxgi.lib d2d1.lib dcomp.lib dwmapi.lib dwrite.lib
 
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <d2d1.h>
 #include <d2d1_1.h>
+#include <dwrite.h>
 #include <dcomp.h>
 #include <tlhelp32.h>
 #include <wrl/client.h>
@@ -24,6 +23,7 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dcomp.lib")
+#pragma comment(lib, "dwrite.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -31,9 +31,6 @@ using Microsoft::WRL::ComPtr;
 static const wchar_t* kTargetProcess = L"GTAProcess.exe";
 static const wchar_t* kWindowClass    = L"FiveM_ESP_Overlay";
 
-// offsets — อัปเดตตาม build b3258
-// คำเตือน: FiveM update บ่อย → offset พวกนี้เปลี่ยนทุก patch
-// ควรใช้ pattern scan แทน static offset
 namespace offsets {
     constexpr uintptr_t World       = 0x25B8A40;
     constexpr uintptr_t LocalPlayer = 0x08;
@@ -54,10 +51,11 @@ static DWORD g_pid = 0;
 static std::atomic<bool> g_running{ true };
 static HWND g_overlay = nullptr;
 
-// entity buffer — double buffered กัน data race
+struct EspEntity;
+
 static std::mutex g_entity_mutex;
-static std::vector<struct EspEntity> g_entities_read;  // renderer อ่าน
-static std::vector<struct EspEntity> g_entities_write; // thread เขียน
+static std::vector<EspEntity> g_entities_read;
+static std::vector<EspEntity> g_entities_write;
 
 // ---------- memory ----------
 template <typename T>
@@ -166,7 +164,6 @@ static Vec3 g_local_pos{};
 // ---------- esp thread ----------
 static void esp_thread() {
     while (g_running) {
-        // ตรวจสอบว่า process ยังอยู่
         if (g_process) {
             DWORD exit_code = 0;
             if (GetExitCodeProcess(g_process, &exit_code) && exit_code != STILL_ACTIVE) {
@@ -229,7 +226,6 @@ static void esp_thread() {
             }
         }
 
-        // swap buffer ใต้ mutex
         {
             std::lock_guard<std::mutex> lock(g_entity_mutex);
             g_entities_read = g_entities_write;
@@ -264,7 +260,7 @@ public:
         ComPtr<IDXGIFactory2> factory;
         adapter->GetParent(IID_PPV_ARGS(&factory));
 
-        // 3. Swap chain for composition — FLIP_DISCARD + PREMULTIPLIED
+        // 3. Swap chain for composition
         DXGI_SWAP_CHAIN_DESC1 scd = {};
         scd.Width              = width;
         scd.Height             = height;
@@ -288,9 +284,12 @@ public:
 
         // 5. D2D factory + render target
         D2D1_FACTORY_OPTIONS opts = {};
-        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                          __uuidof(ID2D1Factory1), &opts, &d2d_factory_);
-        d2d_factory_.As(&d2d_factory1_);
+        hr = D2D1CreateFactory(
+            D2D1_FACTORY_TYPE_SINGLE_THREADED,
+            __uuidof(ID2D1Factory1),
+            &opts,
+            reinterpret_cast<void**>(d2d_factory1_.GetAddressOf()));
+        if (FAILED(hr)) return false;
 
         ComPtr<IDXGISurface> surface;
         swap_chain_->GetBuffer(0, IID_PPV_ARGS(&surface));
@@ -299,14 +298,36 @@ public:
             D2D1_RENDER_TARGET_TYPE_DEFAULT,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                               D2D1_ALPHA_MODE_PREMULTIPLIED));
-        d2d_factory1_->CreateDxgiSurfaceRenderTarget(surface.Get(), &props, &d2d_rt_);
+        hr = d2d_factory1_->CreateDxgiSurfaceRenderTarget(surface.Get(), &props, &d2d_rt_);
+        if (FAILED(hr)) return false;
 
         // 6. Brushes
         d2d_rt_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Red),   &brush_red_);
         d2d_rt_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush_white_);
         d2d_rt_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Lime),  &brush_green_);
 
-        // 7. DirectComposition
+        // 7. DirectWrite factory + text format
+        hr = DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(dwrite_factory_.GetAddressOf()));
+        if (FAILED(hr)) return false;
+
+        hr = dwrite_factory_->CreateTextFormat(
+            L"Segoe UI",
+            nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            12.0f,
+            L"en-us",
+            &text_format_);
+        if (FAILED(hr)) return false;
+
+        text_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+
+        // 8. DirectComposition
         DCompositionCreateDevice(dxgi_device.Get(), IID_PPV_ARGS(&comp_device_));
         comp_device_->CreateTargetForHwnd(hwnd_, TRUE, &comp_target_);
         comp_device_->CreateVisual(&comp_visual_);
@@ -320,7 +341,7 @@ public:
     void begin_frame() {
         WaitForSingleObject(waitable_, 1000);
         d2d_rt_->BeginDraw();
-        d2d_rt_->Clear(D2D1::ColorF(0, 0.0f)); // โปร่งใส
+        d2d_rt_->Clear(D2D1::ColorF(0, 0.0f));
         d2d_rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
@@ -336,14 +357,18 @@ public:
 
     void draw_text(float x, float y, const wchar_t* text,
                    ID2D1SolidColorBrush* brush) {
-        if (!text_format_) return;
-        d2d_rt_->DrawTextW(text, (UINT32)wcslen(text), text_format_,
-                           D2D1::RectF(x, y, x + 300.0f, y + 20.0f), brush);
+        if (!text_format_ || !d2d_rt_ || !text) return;
+        d2d_rt_->DrawText(
+            text,
+            (UINT32)wcslen(text),
+            text_format_.Get(),
+            D2D1::RectF(x, y, x + 300.0f, y + 20.0f),
+            brush);
     }
 
     void end_frame() {
         d2d_rt_->EndDraw();
-        swap_chain_->Present(1, 0); // vsync
+        swap_chain_->Present(1, 0);
     }
 
     ID2D1SolidColorBrush* brush_red()   { return brush_red_.Get(); }
@@ -361,12 +386,13 @@ private:
     ComPtr<ID3D11Device>        d3d_device_;
     ComPtr<ID3D11DeviceContext> d3d_context_;
     ComPtr<IDXGISwapChain1>     swap_chain_;
-    ComPtr<ID2D1Factory>        d2d_factory_;
     ComPtr<ID2D1Factory1>       d2d_factory1_;
     ComPtr<ID2D1RenderTarget>   d2d_rt_;
     ComPtr<ID2D1SolidColorBrush> brush_red_;
     ComPtr<ID2D1SolidColorBrush> brush_white_;
     ComPtr<ID2D1SolidColorBrush> brush_green_;
+
+    ComPtr<IDWriteFactory>      dwrite_factory_;
     ComPtr<IDWriteTextFormat>   text_format_;
 
     ComPtr<IDCompositionDevice>  comp_device_;
@@ -383,7 +409,6 @@ static void render_frame(D2DOverlay& overlay, int w, int h) {
         read_bytes(g_base + offsets::ViewMatrix, matrix, sizeof(matrix));
     }
 
-    // copy entities ใต้ mutex
     std::vector<EspEntity> entities;
     {
         std::lock_guard<std::mutex> lock(g_entity_mutex);
@@ -402,7 +427,6 @@ static void render_frame(D2DOverlay& overlay, int w, int h) {
 
         auto* brush = e.is_player ? overlay.brush_red() : overlay.brush_white();
 
-        // box
         overlay.draw_rect(
             screen.x - box_w * 0.5f,
             screen.y - box_h,
@@ -410,7 +434,6 @@ static void render_frame(D2DOverlay& overlay, int w, int h) {
             box_h,
             brush, 1.0f);
 
-        // health bar
         float hp = e.health > 200.0f ? 200.0f : e.health;
         if (hp < 0) hp = 0;
         float bar_h = box_h * (hp / 200.0f);
@@ -421,7 +444,6 @@ static void render_frame(D2DOverlay& overlay, int w, int h) {
             bar_h,
             overlay.brush_green());
 
-        // name + distance
         wchar_t label[64];
         const char* nm = e.name[0] ? e.name : (e.is_player ? "player" : "ped");
         swprintf(label, 64, L"%hs [%.0fm]", nm, e.distance);
@@ -439,7 +461,7 @@ static void render_frame(D2DOverlay& overlay, int w, int h) {
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
-        return 1; // สำคัญ — ห้าม Windows ลบพื้นหลัง
+        return 1;
     case WM_DESTROY:
         g_running = false;
         PostQuitMessage(0);
@@ -454,7 +476,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr; // D2D จัดการเอง
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = kWindowClass;
     RegisterClassExW(&wc);
 
@@ -471,7 +493,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     ShowWindow(g_overlay, SW_SHOW);
 
-    // init D2D overlay
     D2DOverlay overlay;
     if (!overlay.init(g_overlay, sw, sh)) {
         MessageBoxW(nullptr, L"D2D init failed", L"err", MB_OK);
