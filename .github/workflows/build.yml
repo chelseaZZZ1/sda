@@ -1,51 +1,46 @@
-name: Build Qt6 Application
+name: Build Headshot Tool Executable
 
 on:
   push:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # ปุ่มสำหรับกดสั่ง Build เองจากหน้าเว็บ GitHub
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 1. ติดตั้ง Qt6 บน Runner ของ GitHub
-    - name: Install Qt6
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: '6.6.3' # สามารถเปลี่ยนเป็นเวอร์ชัน Qt6 ที่ต้องการได้
-        arch: 'win64_msvc2019_64'
-        modules: 'qtbase'
-
-    # 2. ตั้งค่า MSVC (Visual Studio Compiler)
-    - name: Set up Visual Studio developer command prompt
+    - name: Setup MSVC Developer Command Prompt
       uses: ilammy/msvc-dev-cmd@v1
 
-    # 3. สั่ง CMake ให้ Generate Build Files
+    - name: Install Qt 6
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '6.6.3'
+        target: 'desktop'
+        arch: 'win64_msvc2019_64'
+        # ลบ modules: qtbase ออกแล้วเพื่อป้องกัน Error
+
     - name: Configure CMake
       run: |
         cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 
-    # 4. สั่ง Compile โปรเจกต์
-    - name: Build
+    - name: Build Project
       run: |
         cmake --build build --config Release
 
-    # 5. ใช้ windeployqt รวบรวมไฟล์ DLL ของ Qt ที่จำเป็นมาไว้โฟลเดอร์เดียวกับ .exe
-    - name: Package with windeployqt
+    - name: Deploy Qt Binaries (windeployqt)
       run: |
-        windeployqt --no-compiler-runtime build/Release/headshot_tool.exe
+        windeployqt --release --no-compiler-runtime build/Release/headshot_tool.exe
 
-    # 6. อัปโหลดโฟลเดอร์ผลลัพธ์ไปเก็บไว้เป็น Artifact บน GitHub ให้กดดาวน์โหลดได้
-    - name: Upload Build Artifact
+    - name: Upload Executable Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: headshot_tool_x64
+        name: headshot_tool_win64
         path: |
-          build/Release/*
+          build/Release/
