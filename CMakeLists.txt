@@ -11,7 +11,7 @@ set(CMAKE_AUTOUIC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 
 add_executable(headshot_tool
-    headshot_tool.cpp
+    dekngo.cpp
 )
 
 target_link_libraries(headshot_tool PRIVATE
