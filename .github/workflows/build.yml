@@ -24,11 +24,14 @@ jobs:
         version: '6.6.3'
         target: 'desktop'
         arch: 'win64_msvc2019_64'
-        # ลบ modules: qtbase ออกแล้วเพื่อป้องกัน Error
+
+    - name: Clean Old Build Directory
+      run: |
+        if (Test-Path build) { Remove-Item -Recurse -Force build }
 
     - name: Configure CMake
       run: |
-        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+        cmake -B build -S .
 
     - name: Build Project
       run: |
