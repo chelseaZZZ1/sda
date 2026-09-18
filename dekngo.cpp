@@ -271,8 +271,6 @@ private:
 
     void scan_targets() {
         // stub — wire to your game's entity list
-        // iterate entity list, filter team/health/vis, project world->screen
-        // fill Target
         targets_scanned_ = 0;
     }
 
@@ -442,9 +440,6 @@ private:
                         stop:0 #5a3fd6, stop:1 #7c5cff);
                     border: none;
                     border-radius: 11px;
-                }
-                QPushButton::after {
-                    background: white;
                 }
             )");
             switch_->setText("● ");
@@ -622,6 +617,40 @@ protected:
     }
 
 private:
+    GameBridge* bridge_;
+    AimCore* core_;
+    QTimer* stats_timer_;
+    bool dragging_ = false;
+    QPoint drag_pos_;
+
+    QPushButton* master_sw_;
+    QComboBox* key_combo_;
+    QComboBox* mode_combo_;
+    QComboBox* smooth_mode_combo_;
+    QComboBox* bone_combo_;
+
+    SliderRow* fov_slider_;
+    SliderRow* smooth_slider_;
+    SliderRow* sens_slider_;
+    SliderRow* maxspeed_slider_;
+    SliderRow* trigger_delay_slider_;
+    SliderRow* trigger_fov_slider_;
+    SliderRow* recoil_amount_slider_;
+    SliderRow* humanize_amp_slider_;
+    SliderRow* humanize_freq_slider_;
+    SliderRow* prediction_slider_;
+
+    ToggleSwitch* auto_fire_sw_;
+    ToggleSwitch* vis_check_sw_;
+    ToggleSwitch* silent_sw_;
+    ToggleSwitch* recoil_sw_;
+
+    FovPreview* fov_preview_;
+    QLabel* target_lbl_;
+    QLabel* scanned_lbl_;
+    QLabel* fps_lbl_;
+    QTextEdit* log_;
+
     void setup_ui() {
         auto* central = new QWidget;
         setCentralWidget(central);
@@ -893,3 +922,135 @@ private:
                 selection-background-color: #2a1f5a;
                 outline: none;
             }
+            QPushButton {
+                background: #1a1a22;
+                color: #888;
+                border: 1px solid #2a2a38;
+                border-radius: 6px;
+                font-weight: 600;
+            }
+            QPushButton:checked {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5a3fd6, stop:1 #7c5cff);
+                color: white;
+                border: none;
+            }
+            QTextEdit#log {
+                background: #0a0a0d;
+                color: #666;
+                border: 1px solid #1a1a22;
+                border-radius: 6px;
+                font-family: Consolas, monospace;
+                font-size: 10px;
+                padding: 4px;
+            }
+        )");
+    }
+
+    void setup_connections() {
+        auto update_cfg = [this]() {
+            AimConfig c;
+            c.enabled = master_sw_->isChecked();
+            c.key = static_cast<AimKey>(key_combo_->currentIndex());
+            c.mode = static_cast<AimMode>(mode_combo_->currentIndex());
+            c.smooth_mode = static_cast<SmoothMode>(smooth_mode_combo_->currentIndex());
+
+            c.fov = static_cast<float>(fov_slider_->value());
+            c.smooth = static_cast<float>(smooth_slider_->value());
+            c.sensitivity = static_cast<float>(sens_slider_->value());
+            c.max_speed = static_cast<float>(maxspeed_slider_->value());
+
+            c.auto_fire = auto_fire_sw_->isChecked();
+            c.vis_check = vis_check_sw_->isChecked();
+            c.silent_aim = silent_sw_->isChecked();
+            c.recoil_comp = recoil_sw_->isChecked();
+
+            c.trigger_delay_ms = static_cast<float>(trigger_delay_slider_->value());
+            c.trigger_fov = static_cast<float>(trigger_fov_slider_->value());
+            c.recoil_amount = static_cast<float>(recoil_amount_slider_->value());
+
+            c.humanize_amp = static_cast<float>(humanize_amp_slider_->value());
+            c.humanize_freq = static_cast<float>(humanize_freq_slider_->value());
+            c.prediction = static_cast<float>(prediction_slider_->value());
+            c.bone_priority = bone_combo_->currentIndex();
+
+            core_->set_config(c);
+
+            fov_preview_->set_fov(c.fov);
+            fov_preview_->set_trigger_fov(c.trigger_fov);
+        };
+
+        connect(master_sw_, &QPushButton::toggled, this, [this, update_cfg](bool checked) {
+            master_sw_->setText(checked ? "ON" : "OFF");
+            log(checked ? "aimbot enabled" : "aimbot disabled");
+            update_cfg();
+        });
+
+        connect(key_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, update_cfg);
+        connect(mode_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, update_cfg);
+        connect(smooth_mode_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, update_cfg);
+        connect(bone_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, update_cfg);
+
+        connect(fov_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(smooth_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(sens_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(maxspeed_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(trigger_delay_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(trigger_fov_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(recoil_amount_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(humanize_amp_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(humanize_freq_slider_, &SliderRow::value_changed, this, update_cfg);
+        connect(prediction_slider_, &SliderRow::value_changed, this, update_cfg);
+
+        connect(auto_fire_sw_, &ToggleSwitch::toggled, this, update_cfg);
+        connect(vis_check_sw_, &ToggleSwitch::toggled, this, update_cfg);
+        connect(silent_sw_, &ToggleSwitch::toggled, this, update_cfg);
+        connect(recoil_sw_, &ToggleSwitch::toggled, this, update_cfg);
+
+        connect(core_, &AimCore::stats_updated, this, [this](int scanned, float fps) {
+            scanned_lbl_->setText(QString("scanned: %1").arg(scanned));
+            fps_lbl_->setText(QString("fps: %1").arg(fps, 0, 'f', 0));
+        });
+
+        connect(core_, &AimCore::log_line, this, &MainWindow::log);
+
+        update_cfg();
+    }
+
+    void update_stats() {
+        auto* status_lbl = findChild<QLabel*>("status_lbl");
+        if (status_lbl) {
+            if (bridge_->attached) {
+                status_lbl_->setText("● online");
+                status_lbl_->setStyleSheet("color:#5cff9d; font-size:11px;");
+            } else {
+                status_lbl_->setText("● offline");
+                status_lbl_->setStyleSheet("color:#ff5c7c; font-size:11px;");
+            }
+        }
+
+        Target t = core_->current_target();
+        if (t.valid) {
+            target_lbl_->setText(QString("target: bone[%1] dist[%2m]").arg(t.bone_id).arg(t.distance, 0, 'f', 1));
+        } else {
+            target_lbl_->setText("target: none");
+        }
+    }
+
+    void log(const QString& msg) {
+        log_->append(QString("[%1] %2")
+            .arg(QTime::currentTime().toString("hh:mm:ss"))
+            .arg(msg));
+    }
+};
+
+#include "headshot_tool.moc"
+
+int main(int argc, char* argv[]) {
+    QApplication app(argc, argv);
+    app.setStyle(QStyleFactory::create("Fusion"));
+
+    MainWindow w;
+    w.show();
+
+    return app.exec();
+}
