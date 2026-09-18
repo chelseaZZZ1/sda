@@ -1,5 +1,5 @@
 // rat_all_in_one.cpp
-// build: cl /std:c++20 /EHsc rat_all_in_one.cpp /link d3d11.lib d3dcompiler.lib winmm.lib ws2_32.lib
+// build: cl /std:c++20 /EHsc rat_all_in_one.cpp imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_win32.cpp imgui/backends/imgui_impl_dx11.cpp /link d3d11.lib dxgi.lib user32.lib gdi32.lib ws2_32.lib
 // deps: imgui/ (core + backends win32/dx11)
 
 #define NOMINMAX
@@ -149,9 +149,6 @@ namespace rat {
         std::deque<std::string> log;
     };
 
-    // ---- TCP listener that accepts and tracks sessions ----
-    // This is the "server side" — a lab transport.
-    // Commands are QUEUED but never auto-executed here.
     class Listener {
     public:
         Listener(uint16_t port) : port_(port) {}
@@ -165,7 +162,7 @@ namespace rat {
             setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
             sockaddr_in a{};
             a.sin_family = AF_INET;
-            a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // bind loopback for safety
+            a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             a.sin_port = htons(port_);
             if (bind(sock_,(sockaddr*)&a,sizeof(a)) == SOCKET_ERROR) return false;
             if (listen(sock_, 16) == SOCKET_ERROR) return false;
@@ -180,7 +177,6 @@ namespace rat {
             WSACleanup();
         }
 
-        // queue a command for a session — does NOT execute anything here
         void send_cmd(int session_id, const std::string& cmd){
             std::lock_guard lk(mu_);
             pending_[session_id].push_back(cmd);
@@ -236,7 +232,6 @@ namespace rat {
             while (running_){
                 int n = recv(c, buf, sizeof(buf), 0);
                 if (n <= 0) break;
-                // parse header if full packet
                 if (n >= (int)sizeof(Packet)){
                     Packet p{};
                     memcpy(&p, buf, sizeof(Packet));
@@ -244,7 +239,6 @@ namespace rat {
                         handle_packet(id, p, buf + sizeof(Packet), n - (int)sizeof(Packet));
                     }
                 }
-                // flush any queued outbound commands for this session
                 std::vector<std::string> out;
                 {
                     std::lock_guard lk(mu_);
@@ -377,7 +371,7 @@ inline void ProgressGlow(const char* label, float pct, ImVec4 color){
     float fw = w*pct;
     dl->AddRectFilledMultiColor(p,{p.x+fw,p.y+8},
         theme::col(color),theme::col(c2),theme::col(c2),theme::col(color));
-    float t = ImGui::GetTime()*2.f;
+    float t = (float)ImGui::GetTime()*2.f;
     float shine = p.x + fmodf(t,1.5f)/1.5f * w;
     if (shine < p.x+fw){
         dl->AddRectFilledMultiColor({shine-30,p.y},{shine,p.y+8},
@@ -468,7 +462,7 @@ struct App {
     anim::Pulse pulse;
     std::vector<ui::Toast> toasts;
     rat::Listener listener{4444};
-    std::string cmd_input;
+    char cmd_input_buf[256] = "";
     std::vector<std::string> console_lines;
 
     App(){
@@ -541,7 +535,7 @@ struct App {
         ImGui::Spacing();
         ui::ProgressGlow("CPU", avg_cpu, theme::accent);  ImGui::Spacing();
         ui::ProgressGlow("RAM", avg_ram, theme::success); ImGui::Spacing();
-        float net = 0.3f + 0.4f*std::sin(ImGui::GetTime()*1.7f);
+        float net = 0.3f + 0.4f*std::sin((float)ImGui::GetTime()*1.7f);
         ui::ProgressGlow("NET", net, theme::accent2);
         ui::EndCard();
 
@@ -619,20 +613,203 @@ struct App {
         ImGui::PopStyleColor();
 
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 130);
-        bool enter = ImGui::InputText("##cmd", &cmd_input,
+        bool enter = ImGui::InputText("##cmd", cmd_input_buf, IM_ARRAYSIZE(cmd_input_buf),
             ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::SameLine();
         bool send = btn_send.draw("send", {110,36}, theme::accent, dt);
 
-        if ((enter || send) && !cmd_input.empty()){
+        if ((enter || send) && cmd_input_buf[0] != '\0'){
+            std::string cmd_str(cmd_input_buf);
             if (selected < 0){
                 toast("select a session first", theme::danger);
                 console_lines.push_back("[!] no session selected");
             } else {
-                listener.send_cmd(selected, cmd_input);
-                console_lines.push_back("[>] queued to #" + std::to_string(selected) + ": " + cmd_input);
+                listener.send_cmd(selected, cmd_str);
+                console_lines.push_back("[>] queued to #" + std::to_string(selected) + ": " + cmd_str);
                 toast("command queued", theme::accent);
             }
-            cmd_input.clear();
+            cmd_input_buf[0] = '\0';
         }
-       
+        ui::EndCard();
+    }
+
+    void draw_settings(float dt){
+        ui::BeginCard("sett", {0,0}, theme::accent);
+        ImGui::TextColored(theme::text_dim, "SETTINGS");
+        ImGui::Spacing();
+        ImGui::Text("Listener Port: %u", listener.port());
+        ui::EndCard();
+    }
+
+    void render(float dt){
+        pulse.update(dt);
+        tick_toasts(dt);
+
+        draw_sidebar(dt);
+        ImGui::SameLine();
+
+        ImGui::BeginGroup();
+        if (page == 0) draw_dashboard(dt);
+        else if (page == 1) draw_sessions(dt);
+        else if (page == 2) draw_console(dt);
+        else if (page == 3) draw_settings(dt);
+        ImGui::EndGroup();
+
+        for (int i = 0; i < (int)toasts.size(); ++i) {
+            toasts[i].draw(i);
+        }
+    }
+};
+
+// ═════════════════════════════════════════════════════════
+// WIN32 & DIRECTX11 MAIN ENTRY
+// ═════════════════════════════════════════════════════════
+ID3D11Device*            g_pd3dDevice = nullptr;
+ID3D11DeviceContext*     g_pd3dDeviceContext = nullptr;
+IDXGISwapChain*          g_pSwapChain = nullptr;
+ID3D11RenderTargetView*  g_mainRenderTargetView = nullptr;
+
+bool CreateDeviceD3D(HWND hWnd);
+void CleanupDeviceD3D();
+void CreateRenderTarget();
+void CleanupRenderTarget();
+LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Class", nullptr };
+    ::RegisterClassExW(&wc);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Control Surface", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+
+    if (!CreateDeviceD3D(hwnd)) {
+        CleanupDeviceD3D();
+        ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return 1;
+    }
+
+    ::ShowWindow(hwnd, SW_SHOWDEFAULT);
+    ::UpdateWindow(hwnd);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    theme::apply();
+
+    ImGui_ImplWin32_Init(hwnd);
+    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+
+    App app;
+    bool done = false;
+    auto last_time = std::chrono::high_resolution_clock::now();
+
+    while (!done) {
+        MSG msg;
+        while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
+            ::TranslateMessage(&msg);
+            ::DispatchMessage(&msg);
+            if (msg.message == WM_QUIT) done = true;
+        }
+        if (done) break;
+
+        auto current_time = std::chrono::high_resolution_clock::now();
+        float dt = std::chrono::duration<float>(current_time - last_time).count();
+        last_time = current_time;
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::SetNextWindowPos({0, 0});
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::Begin("##main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        app.render(dt);
+        ImGui::End();
+
+        ImGui::Render();
+        const float clear_color_with_alpha[4] = { 0.055f, 0.055f, 0.075f, 1.00f };
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+        g_pSwapChain->Present(1, 0);
+    }
+
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+
+    CleanupDeviceD3D();
+    ::DestroyWindow(hwnd);
+    ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
+    return 0;
+}
+
+bool CreateDeviceD3D(HWND hWnd) {
+    DXGI_SWAP_CHAIN_DESC sd;
+    ZeroMemory(&sd, sizeof(sd));
+    sd.BufferCount = 2;
+    sd.BufferDesc.Width = 0;
+    sd.BufferDesc.Height = 0;
+    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferDesc.RefreshRate.Numerator = 60;
+    sd.BufferDesc.RefreshRate.Denominator = 1;
+    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = hWnd;
+    sd.SampleDesc.Count = 1;
+    sd.SampleDesc.Quality = 0;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+    UINT createDeviceFlags = 0;
+    D3D_FEATURE_LEVEL featureLevel;
+    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0, };
+    HRESULT res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (res == DXGI_ERROR_UNSUPPORTED)
+        res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
+    if (res != S_OK) return false;
+
+    CreateRenderTarget();
+    return true;
+}
+
+void CleanupDeviceD3D() {
+    CleanupRenderTarget();
+    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
+    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
+    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+}
+
+void CreateRenderTarget() {
+    ID3D11Texture2D* pBackBuffer;
+    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_mainRenderTargetView);
+    pBackBuffer->Release();
+}
+
+void CleanupRenderTarget() {
+    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+}
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+        return true;
+
+    switch (msg) {
+    case WM_SIZE:
+        if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
+            CleanupRenderTarget();
+            g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
+            CreateRenderTarget();
+        }
+        return 0;
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
+        break;
+    case WM_DESTROY:
+        ::PostQuitMessage(0);
+        return 0;
+    }
+    return ::DefWindowProcW(hWnd, msg, wParam, lParam);
+}
