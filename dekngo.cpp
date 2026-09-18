@@ -2,6 +2,7 @@
 // compile: cmake + Qt6 (Core, Gui, Widgets)
 // target: Windows x64
 
+
 #include <QApplication>
 #include <QMainWindow>
 #include <QWidget>
@@ -1020,14 +1021,13 @@ private:
         auto* status_lbl = findChild<QLabel*>("status_lbl");
         if (status_lbl) {
             if (bridge_->attached) {
-                status_lbl_->setText("● online");
-                status_lbl_->setStyleSheet("color:#5cff9d; font-size:11px;");
+                status_lbl->setText("● online");
+                status_lbl->setStyleSheet("color:#5cff9d; font-size:11px;");
             } else {
-                status_lbl_->setText("● offline");
-                status_lbl_->setStyleSheet("color:#ff5c7c; font-size:11px;");
+                status_lbl->setText("● offline");
+                status_lbl->setStyleSheet("color:#ff5c7c; font-size:11px;");
             }
         }
-
         Target t = core_->current_target();
         if (t.valid) {
             target_lbl_->setText(QString("target: bone[%1] dist[%2m]").arg(t.bone_id).arg(t.distance, 0, 'f', 1));
