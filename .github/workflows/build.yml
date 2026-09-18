@@ -1,11 +1,11 @@
-name: Build FiveM ESP
+name: Build Qt6 Application
 
 on:
   push:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch:
+  workflow_dispatch: # ปุ่มสำหรับกดสั่ง Build เองจากหน้าเว็บ GitHub
 
 jobs:
   build:
@@ -15,19 +15,37 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Clone Dear ImGui
-      run: |
-        git clone https://github.com/ocornut/imgui.git imgui
+    # 1. ติดตั้ง Qt6 บน Runner ของ GitHub
+    - name: Install Qt6
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '6.6.3' # สามารถเปลี่ยนเป็นเวอร์ชัน Qt6 ที่ต้องการได้
+        arch: 'win64_msvc2019_64'
+        modules: 'qtbase'
 
-    - name: Setup Developer Command Prompt for Microsoft Visual C++
+    # 2. ตั้งค่า MSVC (Visual Studio Compiler)
+    - name: Set up Visual Studio developer command prompt
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Compile with MSVC
+    # 3. สั่ง CMake ให้ Generate Build Files
+    - name: Configure CMake
       run: |
-        cl /std:c++20 /EHsc /O2 -I. -Iimgui -Iimgui/backends fivem_esp.cpp imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_win32.cpp imgui/backends/imgui_impl_dx11.cpp /link d3d11.lib dxgi.lib user32.lib gdi32.lib /out:fivem_esp.exe
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 
+    # 4. สั่ง Compile โปรเจกต์
+    - name: Build
+      run: |
+        cmake --build build --config Release
+
+    # 5. ใช้ windeployqt รวบรวมไฟล์ DLL ของ Qt ที่จำเป็นมาไว้โฟลเดอร์เดียวกับ .exe
+    - name: Package with windeployqt
+      run: |
+        windeployqt --no-compiler-runtime build/Release/headshot_tool.exe
+
+    # 6. อัปโหลดโฟลเดอร์ผลลัพธ์ไปเก็บไว้เป็น Artifact บน GitHub ให้กดดาวน์โหลดได้
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: fivem-esp-executable
-        path: fivem_esp.exe
+        name: headshot_tool_x64
+        path: |
+          build/Release/*
