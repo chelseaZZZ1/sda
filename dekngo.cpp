@@ -1043,7 +1043,7 @@ private:
     }
 };
 
-#include "headshot_tool.moc"
+#include "dekngo.moc"
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -1055,4 +1055,3 @@ int main(int argc, char* argv[]) {
     return app.exec();
 }
 
-#include "dekngo.moc"
