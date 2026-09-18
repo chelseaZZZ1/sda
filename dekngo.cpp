@@ -2,7 +2,6 @@
 // compile: cmake + Qt6 (Core, Gui, Widgets)
 // target: Windows x64
 
-
 #include <QApplication>
 #include <QMainWindow>
 #include <QWidget>
@@ -21,6 +20,7 @@
 #include <QTextEdit>
 #include <QTimer>
 #include <QPainter>
+#include <QPainterPath>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QStyleFactory>
